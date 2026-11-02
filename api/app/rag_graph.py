@@ -5,8 +5,9 @@ Flow:
   retrieve → select_best → respond
 
 - retrieve:     query FAISS, get top-K calaveritas
-- select_best:  LLM chooses the most fitting one (no modifications)
-- respond:      return the selected calaverita + session memory update
+- select_best:  LLM elige la mejor candidata y genera una variación nueva,
+                tomando en cuenta el historial de la sesión para no repetir.
+- respond:      devuelve la calaverita generada.
 """
 
 import logging
@@ -18,6 +19,7 @@ from langgraph.graph import StateGraph, END
 
 from app.config import LLM_MODEL, OLLAMA_BASE_URL
 from app.vector_store import get_retriever
+from app.memory import get_history
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,8 @@ class RAGState(TypedDict):
     query: str
     session_id: str
     candidates: Annotated[list[str], operator.add]  # top-K retrieved texts
-    selected: str                                    # best calaverita chosen by LLM
-    answer: str                                      # final answer to user
+    selected: str                                    # calaverita generada por el LLM
+    answer: str                                      # respuesta final al usuario
 
 
 # ── Nodes ──────────────────────────────────────────────────────────────────────
@@ -44,38 +46,42 @@ def retrieve_node(state: RAGState) -> dict:
 
 
 def select_best_node(state: RAGState) -> dict:
-    """Use LLM to select the single most fitting calaverita. No additions."""
-    llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
+    """
+    LLM selects the best candidate and generates a new calaverita based on it.
+    Uses session history to avoid repeating previously delivered calaveritas.
+    """
+    # temperatura > 0 para que haya variación en la generación
+    llm = ChatOllama(model=LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.7)
 
     numbered = "\n\n".join(
         f"[{i+1}]\n{text}" for i, text in enumerate(state["candidates"])
     )
+
+    # Extraer solo los mensajes del asistente (calaveritas ya entregadas)
+    history = get_history(state["session_id"])
+    session_messages = [
+        msg["content"]
+        for msg in history
+        if msg["role"] == "assistant"
+    ]
+
     prompt = (
         f"El usuario busca una calaverita sobre: '{state['query']}'.\n\n"
         f"Tienes estas opciones:\n\n{numbered}\n\n"
-        "Elige SOLAMENTE el número de la calaverita que mejor se adapta al tema. "
-        "Responde ÚNICAMENTE con el número (1, 2 o 3), sin explicación."
+        "Elige la que mejor se adapte a lo que quiere el usuario y genera una en base a la elección. "
+        f"Las calaveritas no se deben repetir, aunque pida lo mismo, así que toma en cuenta el historial: {session_messages}\n\n"
+        "Responde ÚNICAMENTE con la calaverita generada."
+        "En caso de que el usuario solo pida una nueva u otra, devuelve solo una variacion de la ultima que generaste"
     )
 
     response = llm.invoke(prompt)
-    raw = response.content.strip()
-
-    # Parse selection index robustly
-    selected_idx = 0
-    for char in raw:
-        if char.isdigit():
-            idx = int(char) - 1
-            if 0 <= idx < len(state["candidates"]):
-                selected_idx = idx
-                break
-
-    selected = state["candidates"][selected_idx]
-    logger.info("LLM selected candidate index %d", selected_idx)
+    selected = response.content.strip()
+    logger.info("LLM generated calaverita for session %s", state["session_id"])
     return {"selected": selected}
 
 
 def respond_node(state: RAGState) -> dict:
-    """Build the final answer from the selected calaverita."""
+    """Devuelve la calaverita generada como respuesta final."""
     return {"answer": state["selected"]}
 
 
