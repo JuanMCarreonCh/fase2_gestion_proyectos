@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Calaverita RAG ────────────────────────────────────────────────────────────
+# Modelos de Ollama (bind mount local, ~2.3 GB — no subir al repo)
+ollama-data/
+
+# Variables de entorno locales
+api/.env
+
+# Índice FAISS persistente (si se habilita en el futuro)
+api/data/*.faiss
+api/data/*.pkl

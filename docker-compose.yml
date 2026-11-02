@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+
+  # ── 1. Ollama server ──────────────────────────────────────────────────────
+  # Solo sirve la API REST de Ollama. Los modelos los descarga el servicio
+  # "ollama-models" una vez que este contenedor esté healthy.
+  #
+  # PERSISTENCIA: los modelos se guardan en ./ollama-data (carpeta local).
+  # - "docker compose down"     → NO borra los modelos (carpeta local intacta)
+  # - "docker compose down -v"  → tampoco los borra (bind mount, no volumen Docker)
+  # - Para borrar manualmente:  rm -rf ./ollama-data
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama-data:/root/.ollama   # bind mount → carpeta local del proyecto
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── 2. Descargador de modelos ────────────────────────────────────────────
+  # Se ejecuta una vez. Si los modelos ya existen en ./ollama-data,
+  # "ollama pull" los detecta y no los re-descarga (solo verifica).
+  ollama-models:
+    image: ollama/ollama:latest
+    container_name: ollama_models
+    volumes:
+      - ./ollama-data:/root/.ollama   # mismo bind mount que ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "ollama pull qwen2.5:3b &&
+      ollama pull nomic-embed-text &&
+      echo 'Modelos descargados correctamente'"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"   # Solo corre una vez; si los modelos ya están no hace nada
+
+  # ── 3. Backend FastAPI + RAG ──────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: calaverita_api
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LLM_MODEL=qwen2.5:3b
+      - EMBED_MODEL=nomic-embed-text
+      - RETRIEVER_TOP_K=3
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./api:/app
+    restart: unless-stopped
+
+  # ── 4. Frontend Streamlit ─────────────────────────────────────────────────
+  frontend:
+    image: python:3.11
+    container_name: calaverita_frontend
+    working_dir: /app
+    command: >
+      bash -c "pip install --upgrade pip --quiet &&
+      pip install streamlit==1.40.2 requests==2.32.3 --quiet &&
+      streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend:/app
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+# Sin volúmenes Docker nombrados: los modelos viven en ./ollama-data (bind mount).
+# docker compose down -v no afecta esa carpeta.
